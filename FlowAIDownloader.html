@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Flow AI Media Downloader</title>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background: #0a0a15;
+            color: #ffffff;
+            overflow-x: hidden;
+        }
+
+        .neon-glow {
+            text-shadow: 0 0 10px #00f2ff, 0 0 20px #00f2ff, 0 0 30px #00f2ff;
+        }
+
+        .neon-glow-pink {
+            text-shadow: 0 0 10px #ff00ff, 0 0 20px #ff00ff;
+        }
+
+        .button-glow-cyan:hover {
+            box-shadow: 0 0 15px #00f2ff, 0 0 25px #00f2ff, 0 0 35px #00f2ff;
+        }
+
+        .button-glow-red:hover {
+            box-shadow: 0 0 15px #ff3366, 0 0 25px #ff3366;
+        }
+
+        .mono-font {
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        /* Custom scrollbar */
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: #1a1a2e;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: #2a2a3e;
+            border-radius: 4px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: #00f2ff;
+        }
+
+        /* Custom range slider */
+        input[type="range"] {
+            -webkit-appearance: none;
+            appearance: none;
+            background: transparent;
+        }
+
+        input[type="range"]::-webkit-slider-track {
+            background: #2a2a3e;
+            height: 6px;
+            border-radius: 3px;
+        }
+
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: #00f2ff;
+            cursor: pointer;
+            box-shadow: 0 0 10px #00f2ff, 0 0 20px #00f2ff;
+            margin-top: -7px;
+        }
+
+        input[type="range"]::-moz-range-track {
+            background: #2a2a3e;
+            height: 6px;
+            border-radius: 3px;
+        }
+
+        input[type="range"]::-moz-range-thumb {
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: #00f2ff;
+            cursor: pointer;
+            border: none;
+            box-shadow: 0 0 10px #00f2ff, 0 0 20px #00f2ff;
+        }
+
+        .glass-effect {
+            background: rgba(26, 26, 46, 0.6);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(0, 242, 255, 0.1);
+        }
+
+        .input-glass {
+            background: rgba(26, 26, 46, 0.8);
+            border: 1px solid rgba(0, 242, 255, 0.2);
+        }
+
+        .input-glass:focus {
+            border-color: #00f2ff;
+            outline: none;
+            box-shadow: 0 0 10px rgba(0, 242, 255, 0.3);
+        }
+
+        .log-entry {
+            animation: fadeIn 0.3s ease-in;
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(-5px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .transition-all {
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useRef, useEffect } = React;
+
+        function FlowAIDownloader() {
+            const [mode, setMode] = useState('batch');
+            const [status, setStatus] = useState('Ready');
+            const [prompts, setPrompts] = useState('');
+            const [folderName, setFolderName] = useState('flow_media');
+            const [automationSpeed, setAutomationSpeed] = useState('Normal (10-59s)');
+            const [operation, setOperation] = useState('Generate + Download');
+            const [repeatCount, setRepeatCount] = useState(1);
+            const [resolution, setResolution] = useState('1K');
+            const [activityLog, setActivityLog] = useState([
+                { time: '--:--:--', message: 'Ready to start' }
+            ]);
+            const logContainerRef = useRef(null);
+
+            const getCurrentTime = () => {
+                const now = new Date();
+                return now.toTimeString().split(' ')[0];
+            };
+
+            const addLogEntry = (message) => {
+                const newEntry = {
+                    time: getCurrentTime(),
+                    message: message
+                };
+                setActivityLog(prev => [...prev, newEntry]);
+            };
+
+            useEffect(() => {
+                if (logContainerRef.current) {
+                    logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
+                }
+            }, [activityLog]);
+
+            const handleModeSwitch = (newMode) => {
+                setMode(newMode);
+                addLogEntry(`Switched to ${newMode} mode`);
+            };
+
+            const handleStartBatch = () => {
+                setStatus('Processing...');
+                addLogEntry('Batch process started');
+                addLogEntry(`Folder: ${folderName}`);
+                addLogEntry(`Speed: ${automationSpeed}`);
+                addLogEntry(`Operation: ${operation}`);
+                addLogEntry(`Repeat: ${repeatCount}x`);
+                addLogEntry(`Resolution: ${resolution}`);
+                
+                setTimeout(() => {
+                    setStatus('Ready');
+                    addLogEntry('Batch process completed');
+                }, 2000);
+            };
+
+            const handleStop = () => {
+                setStatus('Stopped');
+                addLogEntry('Batch process stopped by user');
+                setTimeout(() => setStatus('Ready'), 1500);
+            };
+
+            const handleClearLog = () => {
+                setActivityLog([{ time: '--:--:--', message: 'Ready to start' }]);
+            };
+
+            const handleLoadFromFile = () => {
+                const input = document.createElement('input');
+                input.type = 'file';
+                input.accept = '.txt';
+                input.onchange = (e) => {
+                    const file = e.target.files[0];
+                    if (file) {
+                        const reader = new FileReader();
+                        reader.onload = (event) => {
+                            setPrompts(event.target.result);
+                            addLogEntry(`Loaded prompts from ${file.name}`);
+                        };
+                        reader.readAsText(file);
+                    }
+                };
+                input.click();
+            };
+
+            const handleDetectMedia = () => {
+                addLogEntry('Detecting media...');
+                setStatus('Detecting...');
+                setTimeout(() => {
+                    addLogEntry('Found 0 media items');
+                    setStatus('Ready');
+                }, 1000);
+            };
+
+            const handleSelectAll = () => {
+                addLogEntry('All media selected');
+            };
+
+            const handleDownloadSelected = () => {
+                addLogEntry('Downloading selected media...');
+                setStatus('Downloading...');
+                setTimeout(() => {
+                    addLogEntry('Download complete');
+                    setStatus('Ready');
+                }, 1500);
+            };
+
+            return (
+                <div className="min-h-screen p-4 bg-gradient-to-br from-[#0a0a15] via-[#1a1a2e] to-[#0a0a15]">
+                    <div className="max-w-3xl mx-auto">
+                        {/* Header */}
+                        <div className="text-center mb-6">
+                            <h1 className="text-3xl font-bold neon-glow" style={{color: '#00f2ff'}}>
+                                Flow AI Downloader
+                            </h1>
+                        </div>
+
+                        {/* Mode Switcher */}
+                        <div className="grid grid-cols-2 gap-2 mb-4">
+                            <button
+                                onClick={() => handleModeSwitch('manual')}
+                                className={`py-3 px-6 rounded-lg font-semibold transition-all ${
+                                    mode === 'manual'
+                                        ? 'bg-[#1e3a5f] text-[#00f2ff] border-2 border-[#00f2ff]'
+                                        : 'bg-[#16213e] text-gray-400 border border-gray-700 hover:border-gray-500'
+                                }`}
+                            >
+                                Manual
+                            </button>
+                            <button
+                                onClick={() => handleModeSwitch('batch')}
+                                className={`py-3 px-6 rounded-lg font-semibold transition-all ${
+                                    mode === 'batch'
+                                        ? 'bg-[#1e3a5f] text-[#00f2ff] border-2 border-[#00f2ff]'
+                                        : 'bg-[#16213e] text-gray-400 border border-gray-700 hover:border-gray-500'
+                                }`}
+                            >
+                                Batch
+                            </button>
+                        </div>
+
+                        {/* Status Bar */}
+                        <div className="mb-6 p-3 rounded-lg text-center bg-[#16213e] border border-[#2a2a3e]">
+                            <span className="text-[#00f2ff] font-medium">{status}</span>
+                        </div>
+
+                        {/* Manual Mode Content */}
+                        {mode === 'manual' && (
+                            <div className="space-y-4 mb-6">
+                                <div className="grid grid-cols-2 gap-3">
+                                    <button
+                                        onClick={handleDetectMedia}
+                                        className="py-4 px-6 rounded-lg font-semibold bg-[#1e3a5f] text-[#00f2ff] border border-[#00f2ff] hover:button-glow-cyan transition-all"
+                                    >
+                                        Detect Media
+                                    </button>
+                                    <button
+                                        onClick={handleSelectAll}
+                                        className="py-4 px-6 rounded-lg font-semibold bg-[#16213e] text-gray-400 border border-gray-700 hover:border-gray-500 transition-all"
+                                    >
+                                        Select All
+                                    </button>
+                                </div>
+                                <button
+                                    onClick={handleDownloadSelected}
+                                    className="w-full py-4 px-6 rounded-lg font-bold text-lg bg-[#00d4dd] text-[#0a0a15] hover:button-glow-cyan transition-all"
+                                >
+                                    Download Selected
+                                </button>
+                            </div>
+                        )}
+
+                        {/* Batch Mode Content */}
+                        {mode === 'batch' && (
+                            <div className="space-y-4 mb-6">
+                                {/* Prompts Area */}
+                                <div>
+                                    <div className="flex justify-between items-center mb-2">
+                                        <label className="text-sm text-gray-400">Prompts (one per line)</label>
+                                        <button
+                                            onClick={handleLoadFromFile}
+                                            className="flex items-center gap-2 px-3 py-1 rounded bg-[#2a2a3e] text-[#00f2ff] text-sm hover:bg-[#3a3a4e] transition-all"
+                                        >
+                                            📁 Load from .txt file
+                                        </button>
+                                    </div>
+                                    <textarea
+                                        value={prompts}
+                                        onChange={(e) => setPrompts(e.target.value)}
+                                        className="w-full h-32 p-3 rounded-lg input-glass text-white resize-none transition-all"
+                                        placeholder="visible pores and micro skin texture, soft neutral makeup, elegant feminine facial structure, calm and emotional expression..."
+                                    />
+                                </div>
+
+                                {/* Settings Grid */}
+                                <div className="space-y-3">
+                                    {/* Folder Name */}
+                                    <div>
+                                        <label className="text-sm text-gray-400 mb-1 block">Folder Name</label>
+                                        <input
+                                            type="text"
+                                            value={folderName}
+                                            onChange={(e) => setFolderName(e.target.value)}
+                                            className="w-full p-3 rounded-lg input-glass text-white transition-all"
+                                        />
+                                    </div>
+
+                                    {/* Automation Speed */}
+                                    <div>
+                                        <label className="text-sm text-gray-400 mb-1 block">Automation Speed</label>
+                                        <select
+                                            value={automationSpeed}
+                                            onChange={(e) => setAutomationSpeed(e.target.value)}
+                                            className="w-full p-3 rounded-lg input-glass text-white transition-all cursor-pointer"
+                                        >
+                                            <option>Normal (10-59s)</option>
+                                            <option>Fast (7-20s)</option>
+                                            <option>Slow (30-90s)</option>
+                                        </select>
+                                    </div>
+
+                                    {/* Operation */}
+                                    <div>
+                                        <label className="text-sm text-gray-400 mb-1 block">Operation</label>
+                                        <select
+                                            value={operation}
+                                            onChange={(e) => setOperation(e.target.value)}
+                                            className="w-full p-3 rounded-lg input-glass text-white transition-all cursor-pointer"
+                                        >
+                                            <option>Generate + Download</option>
+                                            <option>Generate Only</option>
+                                            <option>Download Only</option>
+                                        </select>
+                                    </div>
+                                </div>
+
+                                {/* Repeat Slider */}
+                                <div>
+                                    <div className="flex justify-between items-center mb-2">
+                                        <label className="text-sm text-gray-400">Repeat Each Prompt</label>
+                                        <span className="text-[#00f2ff] font-bold">{repeatCount}x</span>
+                                    </div>
+                                    <input
+                                        type="range"
+                                        min="1"
+                                        max="10"
+                                        value={repeatCount}
+                                        onChange={(e) => setRepeatCount(parseInt(e.target.value))}
+                                        className="w-full"
+                                    />
+                                    <div className="flex justify-between text-xs text-gray-500 mt-1">
+                                        <span>1x</span>
+                                        <span>10x</span>
+                                    </div>
+                                </div>
+
+                                {/* Resolution Selector */}
+                                <div>
+                                    <label className="text-sm text-gray-400 mb-2 block">Download Resolution</label>
+                                    <div className="grid grid-cols-3 gap-2">
+                                        {['1K', '2K', '4K'].map((res) => (
+                                            <button
+                                                key={res}
+                                                onClick={() => setResolution(res)}
+                                                className={`py-3 px-4 rounded-lg font-semibold transition-all ${
+                                                    resolution === res
+                                                        ? 'bg-[#1e3a5f] text-[#00f2ff] border-2 border-[#00f2ff]'
+                                                        : 'bg-[#16213e] text-gray-400 border border-gray-700 hover:border-gray-500'
+                                                }`}
+                                            >
+                                                {res}
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+
+                                {/* Action Buttons */}
+                                <div className="grid grid-cols-2 gap-3 pt-2">
+                                    <button
+                                        onClick={handleStartBatch}
+                                        className="py-4 px-6 rounded-lg font-bold text-lg bg-[#00d4dd] text-[#0a0a15] hover:button-glow-cyan transition-all"
+                                    >
+                                        Start Batch
+                                    </button>
+                                    <button
+                                        onClick={handleStop}
+                                        className="py-4 px-6 rounded-lg font-bold text-lg bg-[#5e2a3a] text-[#ff3366] border border-[#ff3366] hover:button-glow-red transition-all"
+                                    >
+                                        Stop
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Activity Log */}
+                        <div className="mt-6">
+                            <div className="flex justify-between items-center mb-2">
+                                <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">
+                                    Activity Log
+                                </h2>
+                                <button
+                                    onClick={handleClearLog}
+                                    className="text-xs text-[#00f2ff] hover:text-[#00d4dd] transition-all"
+                                >
+                                    Clear
+                                </button>
+                            </div>
+                            <div
+                                ref={logContainerRef}
+                                className="bg-[#0d0d1a] border border-[#2a2a3e] rounded-lg p-4 h-48 overflow-y-auto"
+                            >
+                                {activityLog.map((entry, index) => (
+                                    <div key={index} className="log-entry mono-font text-sm mb-1">
+                                        <span className="text-gray-500">{entry.time}</span>
+                                        <span className="text-[#00f2ff] ml-2">{entry.message}</span>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+
+                        {/* Footer */}
+                        <div className="mt-6 text-center text-xs text-gray-600">
+                            Navigate to flow.google.com or aistudio.google.com
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<FlowAIDownloader />);
+    </script>
+</body>
+</html>

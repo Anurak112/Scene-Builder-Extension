@@ -463,6 +463,26 @@ chrome.runtime.onMessage.addListener((msg, sender, respond) => {
         case 'DOWNLOAD_WITH_RESOLUTION':
             downloadWithResolution(msg.data).then(result => respond(result));
             return true; // Keep channel open for async
+        case 'CONTENT_HEARTBEAT':
+            // Respond with current operation status
+            respond({
+                alive: true,
+                timestamp: Date.now(),
+                batchRunning: batchProcessRunning,
+                harvestRunning: harvestModeRunning,
+                stats: stats
+            });
+            return false;
+        case 'STATUS_REQUEST':
+            // Return detailed status for sidepanel sync
+            respond({
+                success: true,
+                batchRunning: batchProcessRunning,
+                harvestRunning: harvestModeRunning,
+                stats: { ...stats },
+                config: batchConfig
+            });
+            return false;
     }
     return false;
 });

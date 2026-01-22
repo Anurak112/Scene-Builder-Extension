@@ -1,7 +1,7 @@
 {
     "manifest_version": 3,
     "name": "Flow AI Media Downloader TURBO",
-    "version": "5.1.0",
+    "version": "5.2.0",
     "description": "High-volume autonomous media generator for Google Flow AI. Turbo pipeline for 1000+ images/videos with 2-5s delays. Enhanced stability.",
     "permissions": [
         "sidePanel",

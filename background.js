@@ -72,7 +72,7 @@ async function sendToContentScriptWithRetry(tabId, message, maxRetries = 3) {
  * @param {Function} operation - Async operation to perform
  * @param {*} fallback - Fallback value on error
  * @returns {Promise<*>} Result or fallback
- */
+*/
 async function safeTabOperation(operation, fallback = { success: false, error: 'Operation failed' }) {
   try {
     return await operation();
@@ -80,6 +80,147 @@ async function safeTabOperation(operation, fallback = { success: false, error: '
     console.error('Tab operation error:', e);
     return fallback;
   }
+}
+
+// ==================== DOWNLOAD QUEUE MANAGEMENT ====================
+
+const downloadQueue = [];
+const MAX_CONCURRENT_DOWNLOADS = 3;
+let activeDownloads = 0;
+const downloadStats = {
+  total: 0,
+  completed: 0,
+  failed: 0,
+  retried: 0
+};
+
+/**
+ * Add download to queue
+ * @param {Object} task - Download task
+ * @returns {Promise<Object>} Download result
+ */
+async function enqueueDownload(task) {
+  return new Promise((resolve, reject) => {
+    downloadQueue.push({
+      task,
+      resolve,
+      reject,
+      attempts: 0,
+      maxAttempts: 3
+    });
+    downloadStats.total++;
+    processDownloadQueue();
+  });
+}
+
+/**
+ * Process download queue with concurrency control
+ */
+async function processDownloadQueue() {
+  while (downloadQueue.length > 0 && activeDownloads < MAX_CONCURRENT_DOWNLOADS) {
+    const item = downloadQueue.shift();
+    activeDownloads++;
+
+    try {
+      const result = await executeDownloadWithRetry(item);
+      downloadStats.completed++;
+      item.resolve(result);
+    } catch (e) {
+      downloadStats.failed++;
+      item.reject(e);
+    } finally {
+      activeDownloads--;
+      // Continue processing queue
+      if (downloadQueue.length > 0) {
+        processDownloadQueue();
+      }
+    }
+  }
+}
+
+/**
+ * Execute download with retry logic
+ * @param {Object} item - Queue item with task and attempt info
+ * @returns {Promise<Object>} Download result
+ */
+async function executeDownloadWithRetry(item) {
+  const { task, maxAttempts } = item;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    item.attempts = attempt;
+
+    try {
+      const result = await executeDownload(task);
+      return result;
+    } catch (e) {
+      console.log(`Download attempt ${attempt}/${maxAttempts} failed:`, e.message);
+
+      if (attempt === maxAttempts) {
+        throw e;
+      }
+
+      downloadStats.retried++;
+      // Exponential backoff: 1s, 2s, 4s
+      await new Promise(r => setTimeout(r, 1000 * Math.pow(2, attempt - 1)));
+    }
+  }
+
+  throw new Error('Max retries exceeded');
+}
+
+/**
+ * Execute single download with timeout
+ * @param {Object} task - Download task
+ * @param {number} timeout - Timeout in ms
+ * @returns {Promise<Object>} Download result
+ */
+async function executeDownload(task, timeout = 30000) {
+  return new Promise((resolve, reject) => {
+    const timeoutId = setTimeout(() => {
+      reject(new Error('Download timeout'));
+    }, timeout);
+
+    chrome.downloads.download({
+      url: task.url,
+      filename: task.filename,
+      saveAs: false
+    }, (downloadId) => {
+      clearTimeout(timeoutId);
+
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+        return;
+      }
+
+      if (downloadId) {
+        resolve({ success: true, downloadId });
+      } else {
+        reject(new Error('Download failed - no ID returned'));
+      }
+    });
+  });
+}
+
+/**
+ * Get download queue statistics
+ * @returns {Object} Download stats
+ */
+function getDownloadStats() {
+  return {
+    ...downloadStats,
+    queued: downloadQueue.length,
+    active: activeDownloads
+  };
+}
+
+/**
+ * Clear download statistics
+ */
+function resetDownloadStats() {
+  downloadStats.total = 0;
+  downloadStats.completed = 0;
+  downloadStats.failed = 0;
+  downloadStats.retried = 0;
 }
 
 
@@ -206,6 +347,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ alive: true, timestamp: Date.now() });
       return true;
 
+    case 'DOWNLOAD_STATS':
+      // Return download queue statistics
+      sendResponse(getDownloadStats());
+      return true;
+
+    case 'RESET_DOWNLOAD_STATS':
+      // Reset download statistics
+      resetDownloadStats();
+      sendResponse({ success: true });
+      return true;
+
     default:
       console.log('Unknown message type:', message.type);
   }
@@ -238,39 +390,45 @@ async function handleDownload(message, sendResponse) {
     // If we have a prompt and it's a PNG, try to embed metadata
     const isPng = filename.toLowerCase().endsWith('.png') || message.url.includes('.png') || (message.url.startsWith('blob:') && !message.filename?.endsWith('.mp4'));
 
+    let downloadUrl = message.url;
+
     if (prompt && isPng) {
-      const response = await fetch(message.url);
-      const arrayBuffer = await response.arrayBuffer();
-      const newBuffer = injectPNGMetadata(arrayBuffer, 'Prompt', prompt);
+      try {
+        const response = await fetch(message.url);
+        const arrayBuffer = await response.arrayBuffer();
+        const newBuffer = injectPNGMetadata(arrayBuffer, 'Prompt', prompt);
 
-      // Convert ArrayBuffer to Base64 (Service-worker friendly)
-      const base64 = bufferToBase64(newBuffer);
-      const dataUrl = `data:image/png;base64,${base64}`;
+        // Convert ArrayBuffer to Base64 (Service-worker friendly)
+        const base64 = bufferToBase64(newBuffer);
+        downloadUrl = `data:image/png;base64,${base64}`;
+      } catch (metadataError) {
+        console.error('Metadata embedding failed, using original URL:', metadataError);
+        // Continue with original URL
+      }
+    }
 
-      chrome.downloads.download({
-        url: dataUrl,
-        filename: filename,
-        saveAs: false
-      }, (downloadId) => {
-        sendResponse({ success: true, downloadId });
-      });
-    } else {
+    // Use download queue for reliable downloading
+    const result = await enqueueDownload({
+      url: downloadUrl,
+      filename: filename
+    });
+
+    sendResponse(result);
+  } catch (error) {
+    console.error('Download failed:', error);
+
+    // Fallback: try direct download without queue
+    try {
       chrome.downloads.download({
         url: message.url,
         filename: filename,
         saveAs: false
       }, (downloadId) => {
-        sendResponse({ success: true, downloadId });
+        sendResponse({ success: !!downloadId, downloadId, fallback: true });
       });
+    } catch (fallbackError) {
+      sendResponse({ success: false, error: error.message });
     }
-  } catch (error) {
-    console.error('Metadata embedding or download failed:', error);
-    // Fallback to direct download
-    chrome.downloads.download({
-      url: message.url,
-      filename: filename,
-      saveAs: false
-    });
   }
 }
 

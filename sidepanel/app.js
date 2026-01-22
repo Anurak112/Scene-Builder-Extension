@@ -37,7 +37,7 @@ class FlowAIDownloader {
     }
 
     async init() {
-        const s = await chrome.storage.local.get(['apiKey', 'aiFilenames', 'folderName', 'activeBatch', 'embedMetadata', 'enableVoiceNotifications', 'promptTemplates', 'stylePresets']);
+        const s = await chrome.storage.local.get(['apiKey', 'aiFilenames', 'folderName', 'embedMetadata', 'enableVoiceNotifications', 'promptTemplates', 'stylePresets']);
         this.apiKey = s.apiKey || '';
         this.aiFilenames = s.aiFilenames || false;
         this.embedMetadata = s.embedMetadata !== undefined ? s.embedMetadata : true;
@@ -56,9 +56,22 @@ class FlowAIDownloader {
             await chrome.storage.local.set({ stylePresets: this.styles });
         }
 
-        if (s.activeBatch?.isRunning) {
-            this.activeBatch = s.activeBatch;
-            this.addLog(`⚡ Saved session: ${this.activeBatch.currentIndex + 1}/${this.activeBatch.prompts.length}`);
+        // Check for recoverable batch using StateManager
+        if (typeof StateManager !== 'undefined') {
+            const recoverableBatch = await StateManager.getRecoverableBatch();
+            if (recoverableBatch) {
+                this.activeBatch = recoverableBatch;
+                if (recoverableBatch.wasInterrupted) {
+                    this.addLog(`⚠️ Previous batch was interrupted at ${recoverableBatch.currentIndex + 1}/${recoverableBatch.prompts.length}`);
+                    this.addLog(`💡 Click "Resume" to continue from where you left off`);
+                } else if (recoverableBatch.isRunning) {
+                    this.addLog(`⚡ Batch in progress: ${recoverableBatch.currentIndex + 1}/${recoverableBatch.prompts.length}`);
+                } else {
+                    this.addLog(`📋 Saved batch available: ${recoverableBatch.currentIndex + 1}/${recoverableBatch.prompts.length}`);
+                }
+            }
+            // Cleanup old checkpoints
+            StateManager.cleanupCheckpoints();
         }
 
         // Check initial connection
@@ -70,6 +83,7 @@ class FlowAIDownloader {
         // Start heartbeat for connection monitoring
         this.startHeartbeat();
     }
+
 
     addLog(msg) {
         this.activityLog.push({ time: new Date().toTimeString().split(' ')[0], message: msg });
@@ -131,16 +145,29 @@ class FlowAIDownloader {
     async saveBatchState(index, running = true) {
         const prompts = this.prompts.split('\n').filter(p => p.trim());
         this.activeBatch = {
-            prompts, currentIndex: index, isRunning: running,
+            prompts,
+            currentIndex: index,
+            isRunning: running,
+            wasInterrupted: false,
             config: {
-                folderName: this.folderName, automationSpeed: this.automationSpeed,
-                operation: this.operation, repeatCount: this.repeatCount,
-                resolution: this.resolution, aiFilenames: this.aiFilenames,
-                apiKey: this.apiKey, embedMetadata: this.embedMetadata,
+                folderName: this.folderName,
+                automationSpeed: this.automationSpeed,
+                operation: this.operation,
+                repeatCount: this.repeatCount,
+                resolution: this.resolution,
+                aiFilenames: this.aiFilenames,
+                apiKey: this.apiKey,
+                embedMetadata: this.embedMetadata,
                 enableVoiceNotifications: this.enableVoiceNotifications
             }
         };
-        await chrome.storage.local.set({ activeBatch: this.activeBatch });
+
+        // Use StateManager if available
+        if (typeof StateManager !== 'undefined') {
+            await StateManager.saveBatchProgress(this.activeBatch);
+        } else {
+            await chrome.storage.local.set({ activeBatch: this.activeBatch });
+        }
     }
 
     startBatch() {
@@ -191,11 +218,19 @@ class FlowAIDownloader {
         this.addLog('🛑 Stopped');
         if (this.activeBatch) {
             this.activeBatch.isRunning = false;
-            chrome.storage.local.set({ activeBatch: this.activeBatch });
+            this.activeBatch.wasInterrupted = true;
+            // Use StateManager if available
+            if (typeof StateManager !== 'undefined') {
+                StateManager.saveBatchProgress(this.activeBatch);
+            } else {
+                chrome.storage.local.set({ activeBatch: this.activeBatch });
+            }
         }
         chrome.runtime.sendMessage({ type: 'STOP_BATCH' });
         this.updateProgress(0, 0);
+        this.clearCountdown();
         setTimeout(() => this.updateStatus('Ready'), 1500);
+        this.render(); // Re-render to show Resume button
     }
 
     detectMedia() {
@@ -242,7 +277,13 @@ class FlowAIDownloader {
             }
             else if (msg.type === 'BATCH_COMPLETED') {
                 this.activeBatch = null;
-                chrome.storage.local.remove('activeBatch');
+                // Use StateManager if available
+                if (typeof StateManager !== 'undefined') {
+                    StateManager.clearBatch();
+                    StateManager.updateStats({ operations: 1, downloads: msg.downloaded || 0 });
+                } else {
+                    chrome.storage.local.remove('activeBatch');
+                }
                 this.updateStatus('Done ✓');
                 this.updateProgress(0, 0);
                 this.clearCountdown();

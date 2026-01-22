@@ -17,11 +17,15 @@ class FlowAIDownloader {
         this.enableVoiceNotifications = true;
         this.detectedMedia = [];
         this.selectedMedia = new Set();
-        this.activityLog = [{ time: '--:--:--', message: 'TURBO v5.0 Ready' }];
+        this.activityLog = [{ time: '--:--:--', message: 'TURBO v5.1 Ready - Enhanced Stability' }];
         this.activeBatch = null;
         this.progress = { current: 0, total: 0 };
         this.countdown = { remaining: 0, total: 0, currentNum: 0, totalNum: 0 };
         this.harvestModeRunning = false; // Harvest Mode state
+
+        // Connection state
+        this.isConnected = false;
+        this.heartbeatInterval = null;
 
         // Templates and Styles
         this.templates = [];
@@ -57,8 +61,14 @@ class FlowAIDownloader {
             this.addLog(`⚡ Saved session: ${this.activeBatch.currentIndex + 1}/${this.activeBatch.prompts.length}`);
         }
 
+        // Check initial connection
+        await this.checkConnection();
+
         this.render();
         this.listen();
+
+        // Start heartbeat for connection monitoring
+        this.startHeartbeat();
     }
 
     addLog(msg) {
@@ -282,6 +292,95 @@ class FlowAIDownloader {
         setTimeout(() => this.updateStatus('Ready'), 1500);
         this.render();
     }
+
+    // ==================== CONNECTION HEALTH ====================
+
+    async checkConnection() {
+        try {
+            const response = await new Promise((resolve) => {
+                chrome.runtime.sendMessage({ type: 'HEARTBEAT' }, (resp) => {
+                    if (chrome.runtime.lastError) {
+                        resolve({ alive: false });
+                    } else {
+                        resolve(resp || { alive: false });
+                    }
+                });
+            });
+            this.isConnected = response?.alive === true;
+            this.updateConnectionUI();
+            return this.isConnected;
+        } catch {
+            this.isConnected = false;
+            this.updateConnectionUI();
+            return false;
+        }
+    }
+
+    updateConnectionUI() {
+        const statusEl = document.getElementById('connectionStatus');
+        if (statusEl) {
+            statusEl.className = `connection-status ${this.isConnected ? 'connected' : 'disconnected'}`;
+            statusEl.innerHTML = `
+                <span class="status-dot"></span>
+                <span class="status-text">${this.isConnected ? 'Connected' : 'Disconnected'}</span>
+            `;
+        }
+    }
+
+    startHeartbeat() {
+        this.stopHeartbeat(); // Clear any existing
+        this.heartbeatInterval = setInterval(async () => {
+            // Only check during active operations
+            if (this.status === 'Running...' || this.harvestModeRunning) {
+                const wasConnected = this.isConnected;
+                await this.checkConnection();
+
+                if (wasConnected && !this.isConnected) {
+                    this.addLog('⚠️ Connection lost, attempting recovery...');
+                    await this.attemptRecovery();
+                }
+            } else {
+                // Passive check
+                await this.checkConnection();
+            }
+        }, 5000);
+    }
+
+    stopHeartbeat() {
+        if (this.heartbeatInterval) {
+            clearInterval(this.heartbeatInterval);
+            this.heartbeatInterval = null;
+        }
+    }
+
+    async attemptRecovery() {
+        try {
+            // Try to find a valid Flow tab and re-inject content script
+            const tabs = await chrome.tabs.query({ active: true });
+            const validTab = tabs.find(t =>
+                t.url && (
+                    t.url.includes('flow.google.com') ||
+                    t.url.includes('aistudio.google.com') ||
+                    t.url.includes('labs.google')
+                )
+            );
+
+            if (validTab) {
+                await chrome.scripting.executeScript({
+                    target: { tabId: validTab.id },
+                    files: ['content.js']
+                });
+                this.addLog('✅ Recovery successful - content script re-injected');
+                await this.checkConnection();
+            } else {
+                this.addLog('⚠️ No valid Flow tab found for recovery');
+            }
+        } catch (e) {
+            this.addLog(`❌ Recovery failed: ${e.message}`);
+            this.stopBatch();
+        }
+    }
+
 
     attach() {
         // Mode
@@ -666,7 +765,13 @@ class FlowAIDownloader {
 
         root.innerHTML = `
             <div class="app">
-                <h1>⚡ Flow AI TURBO</h1>
+                <div class="header-row">
+                    <h1>⚡ Flow AI TURBO</h1>
+                    <div id="connectionStatus" class="connection-status ${this.isConnected ? 'connected' : 'disconnected'}">
+                        <span class="status-dot"></span>
+                        <span class="status-text">${this.isConnected ? 'Connected' : 'Disconnected'}</span>
+                    </div>
+                </div>
                 <div class="mode-switch">
                     <button id="manualMode" class="${this.mode === 'manual' ? 'active' : ''}">Manual</button>
                     <button id="batchMode" class="${this.mode === 'batch' ? 'active' : ''}">Batch</button>
@@ -678,6 +783,7 @@ class FlowAIDownloader {
                     <div id="logContent" class="log-content">${this.activityLog.map(e => `<div class="log-entry"><span class="log-time">${e.time}</span><span class="log-msg">${e.message}</span></div>`).join('')}</div>
                 </div>
             </div>`;
+
 
         this.attach();
     }

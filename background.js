@@ -13,6 +13,76 @@ chrome.action.onClicked.addListener((tab) => {
   chrome.sidePanel.open({ windowId: tab.windowId });
 });
 
+// ==================== ERROR HANDLING UTILITIES ====================
+
+/**
+ * Valid Google Flow platform URL patterns
+ */
+const VALID_PLATFORMS = [
+  'flow.google.com',
+  'aistudio.google.com',
+  'labs.google'
+];
+
+/**
+ * Find a valid tab with Google Flow platform
+ * @returns {Promise<chrome.tabs.Tab|null>} Valid tab or null
+ */
+async function getValidTab() {
+  const tabs = await chrome.tabs.query({ active: true });
+  const validTab = tabs.find(t =>
+    t.url && t.id && VALID_PLATFORMS.some(p => t.url.includes(p))
+  );
+  return validTab || null;
+}
+
+/**
+ * Send message to content script with retry logic
+ * @param {number} tabId - Tab ID to send message to
+ * @param {Object} message - Message to send
+ * @param {number} maxRetries - Maximum retry attempts
+ * @returns {Promise<Object>} Response from content script
+ */
+async function sendToContentScriptWithRetry(tabId, message, maxRetries = 3) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await new Promise((resolve, reject) => {
+        chrome.tabs.sendMessage(tabId, message, (response) => {
+          if (chrome.runtime.lastError) {
+            reject(new Error(chrome.runtime.lastError.message));
+          } else {
+            resolve(response || { success: true });
+          }
+        });
+      });
+    } catch (e) {
+      console.log(`Message send attempt ${attempt}/${maxRetries} failed:`, e.message);
+      if (attempt === maxRetries) {
+        return { success: false, error: e.message };
+      }
+      // Exponential backoff
+      await new Promise(r => setTimeout(r, 500 * attempt));
+    }
+  }
+  return { success: false, error: 'Max retries exceeded' };
+}
+
+/**
+ * Safe wrapper for tab operations
+ * @param {Function} operation - Async operation to perform
+ * @param {*} fallback - Fallback value on error
+ * @returns {Promise<*>} Result or fallback
+ */
+async function safeTabOperation(operation, fallback = { success: false, error: 'Operation failed' }) {
+  try {
+    return await operation();
+  } catch (e) {
+    console.error('Tab operation error:', e);
+    return fallback;
+  }
+}
+
+
 // Listen for messages from content script and side panel
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   console.log('Background received message:', message);
@@ -130,6 +200,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         log: message.log
       });
       break;
+
+    case 'HEARTBEAT':
+      // Connection health check - respond immediately
+      sendResponse({ alive: true, timestamp: Date.now() });
+      return true;
 
     default:
       console.log('Unknown message type:', message.type);

@@ -13,6 +13,116 @@ let injectionQueue = [];
 let stats = { injected: 0, downloaded: 0, failed: 0, startTime: 0 };
 let downloadCounter = 0; // Global counter for uniqueness
 let usedFilenames = new Set(); // Track all generated filenames to prevent duplicates
+let isConnected = true; // Connection state tracking
+
+// ==================== ERROR HANDLING UTILITIES ====================
+
+/**
+ * Safe execution wrapper with automatic retry for async operations
+ * @param {Function} fn - Async function to execute
+ * @param {*} fallback - Value to return on failure
+ * @param {number} retries - Number of retry attempts
+ * @returns {Promise<*>} Result of function or fallback value
+ */
+async function safeExecute(fn, fallback = null, retries = 3) {
+    for (let attempt = 1; attempt <= retries; attempt++) {
+        try {
+            return await fn();
+        } catch (e) {
+            const errorMsg = e?.message || String(e);
+            log(`❌ Attempt ${attempt}/${retries} failed: ${errorMsg}`);
+            if (attempt === retries) {
+                log(`⚠️ All attempts exhausted, returning fallback`);
+                return fallback;
+            }
+            // Exponential backoff: 500ms, 1000ms, 1500ms
+            await sleep(500 * attempt);
+        }
+    }
+    return fallback;
+}
+
+/**
+ * Safe message sending with error handling
+ * @param {Object} message - Message to send
+ * @returns {Promise<Object>} Response or error object
+ */
+function sendMessageSafe(message) {
+    return new Promise((resolve) => {
+        try {
+            chrome.runtime.sendMessage(message, (response) => {
+                if (chrome.runtime.lastError) {
+                    const error = chrome.runtime.lastError.message;
+                    log(`⚠️ Message error: ${error}`);
+                    isConnected = false;
+                    resolve({ success: false, error });
+                } else {
+                    isConnected = true;
+                    resolve(response || { success: true });
+                }
+            });
+        } catch (e) {
+            log(`⚠️ SendMessage exception: ${e.message}`);
+            isConnected = false;
+            resolve({ success: false, error: e.message });
+        }
+    });
+}
+
+/**
+ * Check if an element is visible and interactable
+ * @param {Element} el - DOM element to check
+ * @returns {boolean} True if element is visible
+ */
+function isVisible(el) {
+    if (!el) return false;
+    try {
+        const rect = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        return (
+            rect.width > 0 &&
+            rect.height > 0 &&
+            el.offsetParent !== null &&
+            style.visibility !== 'hidden' &&
+            style.display !== 'none' &&
+            parseFloat(style.opacity) > 0
+        );
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * Wait for an element to appear with timeout
+ * @param {string} selector - CSS selector
+ * @param {number} timeout - Max wait time in ms
+ * @returns {Promise<Element|null>} Element or null if timeout
+ */
+async function waitForElement(selector, timeout = 5000) {
+    const startTime = Date.now();
+    while (Date.now() - startTime < timeout) {
+        const el = document.querySelector(selector);
+        if (el && isVisible(el)) return el;
+        await sleep(100);
+    }
+    return null;
+}
+
+/**
+ * Check connection to background script
+ * @returns {Promise<boolean>} True if connected
+ */
+async function checkConnection() {
+    try {
+        const response = await sendMessageSafe({ type: 'HEARTBEAT' });
+        isConnected = response.success !== false;
+        return isConnected;
+    } catch {
+        isConnected = false;
+        return false;
+    }
+}
+
 
 // ==================== SMART FILENAME GENERATOR ====================
 // Creates descriptive, unique filenames from prompts
@@ -122,8 +232,8 @@ function initMediaObserver() {
     mediaObserver = new MutationObserver((mutations) => {
         if (!pendingDetection || !pendingDetection.active) return;
 
-        // Check if any new media appeared
-        checkForNewMedia();
+        // Use debounced check for DOM stability
+        checkForNewMediaDebounced();
     });
 
     // Observe the entire document for new images/videos
@@ -166,18 +276,37 @@ function startMediaDetection(timeoutMs = 60000) {
     });
 }
 
-// Check if new media has appeared
+// Check if new media has appeared (with debouncing)
+let checkDebounceTimer = null;
+const STABILITY_THRESHOLD = 300; // ms to wait for DOM to stabilize
+
+function checkForNewMediaDebounced() {
+    if (checkDebounceTimer) clearTimeout(checkDebounceTimer);
+    checkDebounceTimer = setTimeout(() => {
+        checkForNewMedia();
+    }, STABILITY_THRESHOLD);
+}
+
 function checkForNewMedia() {
     if (!pendingDetection || !pendingDetection.active) return;
 
     const currentMedia = scanMedia();
 
-    // Find media that wasn't in the baseline
-    const newMedia = currentMedia.filter(m => !pendingDetection.baselineUrls.has(m.url));
+    // Find media that wasn't in the baseline (with improved deduplication)
+    const newMedia = currentMedia.filter(m => {
+        const sanitizedUrl = sanitizeMediaUrl(m.url);
+        return !isDuplicate(sanitizedUrl, pendingDetection.baselineUrls);
+    });
 
     if (newMedia.length > 0) {
         // Found new media! Take the most recent one (last in array)
         const latest = newMedia[newMedia.length - 1];
+
+        // Validate it's a real media URL
+        if (!isValidMediaUrl(latest.url)) {
+            log(`   ⚠️ Skipping invalid media URL`);
+            return;
+        }
 
         log(`✨ New media detected: ${latest.type} (${latest.width}x${latest.height})`);
 
@@ -189,12 +318,92 @@ function checkForNewMedia() {
     }
 }
 
+/**
+ * Sanitize media URL by removing tracking parameters
+ * @param {string} url - URL to sanitize
+ * @returns {string|null} Sanitized URL or null
+ */
+function sanitizeMediaUrl(url) {
+    if (!url || typeof url !== 'string') return null;
+
+    try {
+        // Remove common tracking parameters
+        const urlObj = new URL(url);
+        urlObj.searchParams.delete('t');
+        urlObj.searchParams.delete('_');
+        urlObj.searchParams.delete('token');
+        return urlObj.toString();
+    } catch {
+        return url;
+    }
+}
+
+/**
+ * Check if URL is a valid media URL from Google platforms
+ * @param {string} url - URL to validate
+ * @returns {boolean} True if valid media URL
+ */
+function isValidMediaUrl(url) {
+    if (!url) return false;
+
+    const validPatterns = [
+        /storage\.googleapis\.com/,
+        /googleusercontent\.com/,
+        /lh[0-9]\.google/,
+        /ggpht\.com/,
+        /^blob:/
+    ];
+
+    const invalidPatterns = [
+        /\/icons\//i,
+        /\/logo/i,
+        /favicon/i,
+        /avatar/i,
+        /profile/i,
+        /\.svg$/i,
+        /data:image\/svg/i
+    ];
+
+    // Must match at least one valid pattern
+    const isValid = validPatterns.some(p => p.test(url));
+    // Must not match any invalid pattern
+    const isInvalid = invalidPatterns.some(p => p.test(url));
+
+    return isValid && !isInvalid;
+}
+
+/**
+ * Check if URL is a duplicate (considering URL variations)
+ * @param {string} url - URL to check
+ * @param {Set} existingUrls - Set of existing URLs
+ * @returns {boolean} True if duplicate
+ */
+function isDuplicate(url, existingUrls) {
+    if (!url) return true;
+
+    const normalized = sanitizeMediaUrl(url);
+    if (existingUrls.has(normalized)) return true;
+    if (existingUrls.has(url)) return true;
+
+    // Check for similar URLs (different size params but same base)
+    const baseUrl = url.split('=')[0];
+    for (const existing of existingUrls) {
+        if (existing.split('=')[0] === baseUrl) return true;
+    }
+
+    return false;
+}
+
 // Stop media detection (cleanup)
 function stopMediaDetection() {
     if (pendingDetection) {
         clearTimeout(pendingDetection.timeout);
         pendingDetection.active = false;
         pendingDetection = null;
+    }
+    if (checkDebounceTimer) {
+        clearTimeout(checkDebounceTimer);
+        checkDebounceTimer = null;
     }
 }
 
@@ -359,28 +568,24 @@ async function runTurboPipeline(config) {
 
 // ==================== TURBO INJECTION ====================
 async function turboInject(prompt) {
-    // Find input (cached selector)
-    let input = document.querySelector(SEL.input);
+    return safeExecute(async () => {
+        // Find input using multiple strategies
+        let input = findInputField();
 
-    // Fallback scan
-    if (!input) {
-        const editables = document.querySelectorAll('[contenteditable="true"]');
-        input = Array.from(editables).find(el => {
-            const r = el.getBoundingClientRect();
-            return r.width > 100 && r.height > 20;
-        });
-    }
+        if (!input) {
+            log('   ⚠️ No input field found');
+            return false;
+        }
 
-    if (!input) {
-        const textareas = document.querySelectorAll('textarea');
-        input = Array.from(textareas).find(el => !el.disabled && el.offsetWidth > 100);
-    }
+        // Ensure input is visible
+        if (!isVisible(input)) {
+            log('   ⚠️ Input field not visible');
+            return false;
+        }
 
-    if (!input) return false;
-
-    try {
         // Focus and clear
         input.focus();
+        await sleep(50);
 
         const isTextarea = input.tagName === 'TEXTAREA' || input.tagName === 'INPUT';
 
@@ -399,30 +604,98 @@ async function turboInject(prompt) {
         await sleep(100);
 
         // Find and click button
-        let btn = document.querySelector(SEL.button);
+        let btn = findGenerateButton();
 
-        if (!btn) {
-            const buttons = document.querySelectorAll('button');
-            btn = Array.from(buttons).find(b => {
-                if (b.disabled) return false;
-                const txt = (b.textContent + b.getAttribute('aria-label') + b.getAttribute('title')).toLowerCase();
-                return txt.includes('generate') || txt.includes('create') || txt.includes('run') || txt.includes('send');
-            });
-        }
-
-        if (btn && !btn.disabled) {
+        if (btn && !btn.disabled && isVisible(btn)) {
             btn.click();
             return true;
         }
 
         // Fallback: Enter key
+        log('   ℹ️ Using Enter key fallback');
         input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
         return true;
-
-    } catch (e) {
-        return false;
-    }
+    }, false, 2); // 2 retries for injection
 }
+
+/**
+ * Find input field using multiple strategies
+ * @returns {Element|null} Input element or null
+ */
+function findInputField() {
+    // Strategy 1: Cached selector
+    let input = document.querySelector(SEL.input);
+    if (input && isVisible(input)) return input;
+
+    // Strategy 2: Contenteditable with large dimensions
+    const editables = document.querySelectorAll('[contenteditable="true"]');
+    input = Array.from(editables).find(el => {
+        const r = el.getBoundingClientRect();
+        return r.width > 200 && r.height > 30 && isVisible(el);
+    });
+    if (input) return input;
+
+    // Strategy 3: Visible textarea
+    const textareas = document.querySelectorAll('textarea');
+    input = Array.from(textareas).find(el => !el.disabled && el.offsetWidth > 100 && isVisible(el));
+    if (input) return input;
+
+    // Strategy 4: Textarea near submit button
+    const form = document.querySelector('form');
+    if (form) {
+        input = form.querySelector('textarea, [contenteditable="true"]');
+        if (input && isVisible(input)) return input;
+    }
+
+    return null;
+}
+
+/**
+ * Find generate/submit button using multiple strategies
+ * @returns {Element|null} Button element or null
+ */
+function findGenerateButton() {
+    // Strategy 1: Cached selector
+    let btn = document.querySelector(SEL.button);
+    if (btn && !btn.disabled && isVisible(btn)) return btn;
+
+    // Strategy 2: Pattern-based search
+    const buttonPatterns = [
+        'button[aria-label*="Generate" i]',
+        'button[aria-label*="Create" i]',
+        'button[aria-label*="Send" i]',
+        'button[aria-label*="Run" i]',
+        'button[type="submit"]'
+    ];
+
+    for (const pattern of buttonPatterns) {
+        btn = document.querySelector(pattern);
+        if (btn && !btn.disabled && isVisible(btn)) return btn;
+    }
+
+    // Strategy 3: Text content search
+    const buttons = document.querySelectorAll('button');
+    btn = Array.from(buttons).find(b => {
+        if (b.disabled || !isVisible(b)) return false;
+        const txt = ((b.textContent || '') + (b.getAttribute('aria-label') || '') + (b.getAttribute('title') || '')).toLowerCase();
+        return txt.includes('generate') || txt.includes('create') || txt.includes('run') || txt.includes('send');
+    });
+    if (btn) return btn;
+
+    // Strategy 4: Find button near input field
+    const inputField = findInputField();
+    if (inputField) {
+        const parent = inputField.closest('form, [role="form"], div[class*="input"], div[class*="prompt"]');
+        if (parent) {
+            const parentButtons = parent.querySelectorAll('button');
+            btn = Array.from(parentButtons).find(b => !b.disabled && isVisible(b));
+            if (btn) return btn;
+        }
+    }
+
+    return null;
+}
+
 
 // ==================== GENERATION WAIT ====================
 async function waitGeneration(speed, currentNum = 0, totalNum = 0) {
@@ -434,41 +707,103 @@ async function waitGeneration(speed, currentNum = 0, totalNum = 0) {
     };
 
     const [min, max] = delays[speed] || delays['Normal (10-59s)'];
-    const wait = rand(min, max);
-    const totalSeconds = Math.ceil(wait / 1000);
+    const targetWait = rand(min, max);
+    const totalSeconds = Math.ceil(targetWait / 1000);
 
-    log(`   ⏳ Waiting ${totalSeconds}s for generation...`);
+    log(`   ⏳ Waiting up to ${totalSeconds}s for generation...`);
 
-    // Countdown with updates every second
+    let elapsed = 0;
+    const checkInterval = 1000; // Check every second
+    let loadingDetectedAt = 0;
+    let loadingGoneAt = 0;
+
+    // Adaptive wait with DOM state monitoring
     for (let i = totalSeconds; i > 0 && batchProcessRunning; i--) {
-        chrome.runtime.sendMessage({
+        // Update countdown UI
+        sendMessageSafe({
             type: 'COUNTDOWN_UPDATE',
             remaining: i,
             total: totalSeconds,
             currentNum: currentNum,
             totalNum: totalNum
         });
-        await sleep(1000);
-    }
 
-    // Quick loading check (max 3 attempts)
-    log(`   🔍 Checking if generation complete...`);
-    let loadingChecks = 0;
-    for (let i = 0; i < 3 && batchProcessRunning; i++) {
-        const loading = document.querySelector(SEL.loading);
-        if (loading && loading.offsetParent !== null) {
-            loadingChecks++;
-            log(`   ⏳ Still generating... (check ${loadingChecks}/3)`);
-            await sleep(3000);
-        } else {
-            if (loadingChecks > 0) {
-                log(`   ✅ Generation complete`);
-            }
+        // Check DOM loading state
+        const isLoading = isGenerationInProgress();
+
+        if (isLoading && !loadingDetectedAt) {
+            loadingDetectedAt = elapsed;
+            log(`   🔄 Generation started (loading indicator detected)`);
+        }
+
+        if (!isLoading && loadingDetectedAt && !loadingGoneAt) {
+            loadingGoneAt = elapsed;
+            log(`   ✅ Generation appears complete after ${elapsed}s`);
+
+            // Wait a bit more for media to render, then exit early
+            await sleep(1500);
+            break;
+        }
+
+        await sleep(checkInterval);
+        elapsed += 1;
+
+        // Early exit for Turbo mode if we detect completion
+        if (speed === 'Turbo (2-5s)' && loadingGoneAt && elapsed > loadingGoneAt + 1) {
             break;
         }
     }
 
-    await sleep(1000); // Buffer
+    // Final loading check (max 3 attempts) if we haven't detected completion
+    if (!loadingGoneAt) {
+        log(`   🔍 Final check for generation completion...`);
+        let loadingChecks = 0;
+        for (let i = 0; i < 3 && batchProcessRunning; i++) {
+            if (isGenerationInProgress()) {
+                loadingChecks++;
+                log(`   ⏳ Still generating... (check ${loadingChecks}/3)`);
+                await sleep(3000);
+            } else {
+                if (loadingChecks > 0) {
+                    log(`   ✅ Generation complete`);
+                }
+                break;
+            }
+        }
+    }
+
+    await sleep(800); // Small buffer for media to fully render
+}
+
+/**
+ * Check if AI generation is currently in progress
+ * @returns {boolean} True if loading indicators are visible
+ */
+function isGenerationInProgress() {
+    // Multiple loading indicator patterns
+    const loadingPatterns = [
+        SEL.loading,
+        '[aria-busy="true"]',
+        '[class*="loading"]',
+        '[class*="spinner"]',
+        '[class*="progress"]',
+        'mat-spinner',
+        'ms-spinner',
+        '[class*="generating"]'
+    ];
+
+    for (const pattern of loadingPatterns) {
+        try {
+            const el = document.querySelector(pattern);
+            if (el && isVisible(el)) {
+                return true;
+            }
+        } catch {
+            // Invalid selector, skip
+        }
+    }
+
+    return false;
 }
 
 // ==================== MEDIA SCANNING ====================
